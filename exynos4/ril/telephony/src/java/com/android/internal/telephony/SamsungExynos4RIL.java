@@ -1,8 +1,7 @@
 /*
- * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
- * Not a Contribution.
- *
  * Copyright (C) 2006 The Android Open Source Project
+ * Copyright (C) 2011 The CyanogenMod Project <http://www.cyanogenmod.org>
+ * Copyright (C) 2014 The OmniROM Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -156,7 +155,6 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
     static final int RIL_UNSOL_MIP_CONNECT_STATUS = 11032;
 
     protected HandlerThread mSamsungExynos4RILThread;
-    protected ConnectivityHandler mSamsungExynos4RILHandler;
     private AudioManager audioManager;
     private boolean mIsGBModem = SystemProperties.getBoolean("ro.ril.gbmodem", false);
 
@@ -170,165 +168,15 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
     static String
     requestToString(int request) {
         switch (request) {
-            case RIL_REQUEST_DIAL_EMERGENCY: return "DIAL_EMERGENCY";
-            default: return RIL.requestToString(request);
+            case RIL_REQUEST_DIAL_EMERGENCY: return "DIAL_EMERGENCY"; // We want to take care of this
+            default: return RIL.requestToString(request); // Everything else comes from super class
         }
     }
 
-    //@Override
-    public void setCurrentPreferredNetworkType() {
-        if (RILJ_LOGD) riljLog("setCurrentPreferredNetworkType IGNORED");
-        /* Google added this as a fix for crespo loosing network type after
-         * taking an OTA. This messes up the data connection state for us
-         * due to the way we handle network type change (disable data
-         * then change then re-enable).
-         */
-    }
-
-    private boolean NeedReconnect()
-    {
-        ConnectivityManager cm =
-            (ConnectivityManager)mContext.getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo ni_active = cm.getActiveNetworkInfo();
-
-        return ni_active != null && ni_active.getTypeName().equalsIgnoreCase( "mobile" ) &&
-                ni_active.isConnected() && cm.getMobileDataEnabled();
-    }
-
-    @Override
-    public void setPreferredNetworkType(int networkType , Message response) {
-        /* Samsung modem implementation does bad things when a datacall is running
-         * while switching the preferred networktype.
-         */
-        HandlerThread handlerThread;
-        Looper looper;
-
-        if(NeedReconnect())
-        {
-            if (mSamsungExynos4RILHandler == null) {
-
-                handlerThread = new HandlerThread("mSamsungExynos4RILThread");
-                mSamsungExynos4RILThread = handlerThread;
-
-                mSamsungExynos4RILThread.start();
-
-                looper = mSamsungExynos4RILThread.getLooper();
-                mSamsungExynos4RILHandler = new ConnectivityHandler(mContext, looper);
-            }
-            mSamsungExynos4RILHandler.setPreferedNetworkType(networkType, response);
-        } else {
-            if (mSamsungExynos4RILHandler != null) {
-                mSamsungExynos4RILThread = null;
-                mSamsungExynos4RILHandler = null;
-            }
-            sendPreferedNetworktype(networkType, response);
-        }
-
-    }
-
-    //Sends the real RIL request to the modem.
-    private void sendPreferedNetworktype(int networkType, Message response) {
-        RILRequest rr = RILRequest.obtain(
-                RILConstants.RIL_REQUEST_SET_PREFERRED_NETWORK_TYPE, response);
-
-        rr.mParcel.writeInt(1);
-        rr.mParcel.writeInt(networkType);
-
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest)
-                + " : " + networkType);
-
-        send(rr);
-    }
-
-    /* private class that does the handling for the dataconnection
-     * dataconnection is done async, so we send the request for disabling it,
-     * wait for the response, set the prefered networktype and notify the
-     * real sender with its result.
-     */
-    private class ConnectivityHandler extends Handler{
-
-        private static final int MESSAGE_SET_PREFERRED_NETWORK_TYPE = 30;
-        private Context mContext;
-        private int mDesiredNetworkType;
-        //the original message, we need it for calling back the original caller when done
-        private Message mNetworktypeResponse;
-        private ConnectivityBroadcastReceiver mConnectivityReceiver =  new ConnectivityBroadcastReceiver();
-
-        public ConnectivityHandler(Context context, Looper looper)
-        {
-            super (looper);
-            mContext = context;
-        }
-
-        private void startListening() {
-            IntentFilter filter = new IntentFilter();
-            filter.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
-            mContext.registerReceiver(mConnectivityReceiver, filter);
-        }
-
-        private synchronized void stopListening() {
-            mContext.unregisterReceiver(mConnectivityReceiver);
-        }
-
-        public void setPreferedNetworkType(int networkType, Message response)
-        {
-            Rlog.d(RILJ_LOG_TAG, "Mobile Dataconnection is online setting it down");
-            mDesiredNetworkType = networkType;
-            mNetworktypeResponse = response;
-            ConnectivityManager cm =
-                (ConnectivityManager)mContext.getSystemService(Context.CONNECTIVITY_SERVICE);
-            //start listening for the connectivity change broadcast
-            startListening();
-            cm.setMobileDataEnabled(false);
-        }
-
-        @Override
-        public void handleMessage(Message msg) {
-            switch(msg.what) {
-            //networktype was set, now we can enable the dataconnection again
-            case MESSAGE_SET_PREFERRED_NETWORK_TYPE:
-                ConnectivityManager cm =
-                    (ConnectivityManager)mContext.getSystemService(Context.CONNECTIVITY_SERVICE);
-
-                Rlog.d(RILJ_LOG_TAG, "preferred NetworkType set upping Mobile Dataconnection");
-                cm.setMobileDataEnabled(true);
-                //everything done now call back that we have set the networktype
-                AsyncResult.forMessage(mNetworktypeResponse, null, null);
-                mNetworktypeResponse.sendToTarget();
-                mNetworktypeResponse = null;
-                break;
-            default:
-                throw new RuntimeException("unexpected event not handled");
-            }
-        }
-
-        private class ConnectivityBroadcastReceiver extends BroadcastReceiver {
-
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                String action = intent.getAction();
-                if (!action.equals(ConnectivityManager.CONNECTIVITY_ACTION)) {
-                    Rlog.w(RILJ_LOG_TAG, "onReceived() called with " + intent);
-                    return;
-                }
-                boolean noConnectivity =
-                    intent.getBooleanExtra(ConnectivityManager.EXTRA_NO_CONNECTIVITY, false);
-
-                if (noConnectivity) {
-                    //Ok dataconnection is down, now set the networktype
-                    Rlog.w(RILJ_LOG_TAG, "Mobile Dataconnection is now down setting preferred NetworkType");
-                    stopListening();
-                    sendPreferedNetworktype(mDesiredNetworkType, obtainMessage(MESSAGE_SET_PREFERRED_NETWORK_TYPE));
-                    mDesiredNetworkType = -1;
-                }
-            }
-        }
-    }
-
-    @Override
-    protected RILRequest processSolicited (Parcel p) {
-	    int serial, error;
-	    boolean found = false;
+    protected RILRequest
+    processSolicited (Parcel p) {
+        int serial, error;
+        boolean found = false;
 
         serial = p.readInt();
         error = p.readInt();
@@ -348,7 +196,16 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
         if (error == 0 || p.dataAvail() > 0) {
             // either command succeeds or command fails but with data payload
             try {switch (rr.mRequest) {
+            /*
+ cat libs/telephony/ril_commands.h \
+ | egrep "^ *{RIL_" \
+ | sed -re 's/\{([^,]+),[^,]+,([^}]+).+/case \1: ret = \2(p); break;/'
+             */
 
+            // We want to take care of this
+            case RIL_REQUEST_DIAL_EMERGENCY: ret = responseVoid(p); break;
+
+            // Everything below comes from super class
             case RIL_REQUEST_GET_SIM_STATUS: ret =  responseIccCardStatus(p); break;
             case RIL_REQUEST_ENTER_SIM_PIN: ret =  responseInts(p); break;
             case RIL_REQUEST_ENTER_SIM_PUK: ret =  responseInts(p); break;
@@ -362,7 +219,16 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
             case RIL_REQUEST_GET_IMSI: ret =  responseString(p); break;
             case RIL_REQUEST_HANGUP: ret =  responseVoid(p); break;
             case RIL_REQUEST_HANGUP_WAITING_OR_BACKGROUND: ret =  responseVoid(p); break;
-            case RIL_REQUEST_HANGUP_FOREGROUND_RESUME_BACKGROUND: ret =  responseVoid(p); break;
+            case RIL_REQUEST_HANGUP_FOREGROUND_RESUME_BACKGROUND: {
+                if (mTestingEmergencyCall.getAndSet(false)) {
+                    if (mEmergencyCallbackModeRegistrant != null) {
+                        riljLog("testing emergency call, notify ECM Registrants");
+                        mEmergencyCallbackModeRegistrant.notifyRegistrant();
+                    }
+                }
+                ret =  responseVoid(p);
+                break;
+            }
             case RIL_REQUEST_SWITCH_WAITING_OR_HOLDING_AND_ACTIVE: ret =  responseVoid(p); break;
             case RIL_REQUEST_CONFERENCE: ret =  responseVoid(p); break;
             case RIL_REQUEST_UDUB: ret =  responseVoid(p); break;
@@ -453,14 +319,34 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
             case RIL_REQUEST_REPORT_SMS_MEMORY_STATUS: ret = responseVoid(p); break;
             case RIL_REQUEST_REPORT_STK_SERVICE_IS_RUNNING: ret = responseVoid(p); break;
             case RIL_REQUEST_CDMA_GET_SUBSCRIPTION_SOURCE: ret =  responseVoid(p); break;
+            case RIL_REQUEST_GET_DATA_CALL_PROFILE: ret =  responseGetDataCallProfile(p); break;
             case RIL_REQUEST_ISIM_AUTHENTICATION: ret =  responseString(p); break;
             case RIL_REQUEST_ACKNOWLEDGE_INCOMING_GSM_SMS_WITH_PDU: ret = responseVoid(p); break;
             case RIL_REQUEST_STK_SEND_ENVELOPE_WITH_STATUS: ret = responseICC_IO(p); break;
             case RIL_REQUEST_VOICE_RADIO_TECH: ret = responseInts(p); break;
-            case RIL_REQUEST_DIAL_EMERGENCY: ret = responseVoid(p); break;
+            case RIL_REQUEST_GET_CELL_INFO_LIST: ret = responseCellInfoList(p); break;
+            case RIL_REQUEST_SET_UNSOL_CELL_INFO_LIST_RATE: ret = responseVoid(p); break;
+            case RIL_REQUEST_SET_INITIAL_ATTACH_APN: ret = responseVoid(p); break;
+            case RIL_REQUEST_SET_DATA_PROFILE: ret = responseVoid(p); break;
+            case RIL_REQUEST_IMS_REGISTRATION_STATE: ret = responseInts(p); break;
+            case RIL_REQUEST_IMS_SEND_SMS: ret =  responseSMS(p); break;
+            case RIL_REQUEST_SIM_TRANSMIT_APDU_BASIC: ret =  responseICC_IO(p); break;
+            case RIL_REQUEST_SIM_OPEN_CHANNEL: ret  = responseInts(p); break;
+            case RIL_REQUEST_SIM_CLOSE_CHANNEL: ret  = responseVoid(p); break;
+            case RIL_REQUEST_SIM_TRANSMIT_APDU_CHANNEL: ret = responseICC_IO(p); break;
+            case RIL_REQUEST_SIM_GET_ATR: ret = responseString(p); break;
+            case RIL_REQUEST_NV_READ_ITEM: ret = responseString(p); break;
+            case RIL_REQUEST_NV_WRITE_ITEM: ret = responseVoid(p); break;
+            case RIL_REQUEST_NV_WRITE_CDMA_PRL: ret = responseVoid(p); break;
+            case RIL_REQUEST_NV_RESET_CONFIG: ret = responseVoid(p); break;
+            case RIL_REQUEST_SET_UICC_SUBSCRIPTION: ret = responseVoid(p); break;
+            case RIL_REQUEST_ALLOW_DATA: ret = responseVoid(p); break;
+            case RIL_REQUEST_GET_HARDWARE_CONFIG: ret = responseHardwareConfig(p); break;
+            case RIL_REQUEST_SIM_AUTHENTICATION: ret =  responseICC_IOBase64(p); break;
+            case RIL_REQUEST_SHUTDOWN: ret = responseVoid(p); break;
             default:
                 throw new RuntimeException("Unrecognized solicited response: " + rr.mRequest);
-                //break;
+            //break;
             }} catch (Throwable tr) {
                 // Exceptions here usually mean invalid RIL responses
 
@@ -503,20 +389,21 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
             AsyncResult.forMessage(rr.mResult, ret, null);
             rr.mResult.sendToTarget();
         }
-
         return rr;
     }
 
     @Override
     public void
     dial(String address, int clirMode, UUSInfo uusInfo, Message result) {
-        RILRequest rr;
+
+        // We want to take care of this
         if (PhoneNumberUtils.isEmergencyNumber(address)) {
             dialEmergencyCall(address, clirMode, result);
             return;
         }
 
-        rr = RILRequest.obtain(RIL_REQUEST_DIAL, result);
+        // Everything below comes from super class
+        RILRequest rr = RILRequest.obtain(RIL_REQUEST_DIAL, result);
         rr.mParcel.writeString(address);
         rr.mParcel.writeInt(clirMode);
         rr.mParcel.writeInt(0); // UUS information is absent
@@ -537,10 +424,9 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
 
     public void
     dialEmergencyCall(String address, int clirMode, Message result) {
-        RILRequest rr;
         Rlog.v(RILJ_LOG_TAG, "Emergency dial: " + address);
 
-        rr = RILRequest.obtain(RIL_REQUEST_DIAL_EMERGENCY, result);
+        RILRequest rr = RILRequest.obtain(RIL_REQUEST_DIAL_EMERGENCY, result);
         rr.mParcel.writeString(address + "/");
         rr.mParcel.writeInt(clirMode);
         rr.mParcel.writeInt(0);
@@ -622,7 +508,6 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
 
                 // Initial conditions
                 setRadioPower(false, null);
-                sendPreferedNetworktype(mPreferredNetworkType, null);
                 setCdmaSubscriptionSource(mCdmaSubscription, null);
                 notifyRegistrantsRilConnectionChanged(((int[])ret)[0]);
                 break;
