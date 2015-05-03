@@ -362,32 +362,57 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
             }
         }
 
-        if (error != 0) {
-            //ugly fix for Samsung messing up SMS_SEND request fail in binary RIL
-            if(!(error == -1 && rr.mRequest == RIL_REQUEST_SEND_SMS))
-            {
-                rr.onError(error, ret);
-                return rr;
-            } else {
-                try
-                {
-                    ret =  responseSMS(p);
-                } catch (Throwable tr) {
-                    Rlog.w(RILJ_LOG_TAG, rr.serialString() + "< "
-                            + requestToString(rr.mRequest)
-                            + " exception, Processing Samsung SMS fix ", tr);
-                    rr.onError(error, ret);
-                    return rr;
-                }
-            }
+        if (rr.mRequest == RIL_REQUEST_SHUTDOWN) {
+            // Set RADIO_STATE to RADIO_UNAVAILABLE to continue shutdown process
+            // regardless of error code to continue shutdown procedure.
+            riljLog("Response to RIL_REQUEST_SHUTDOWN received. Error is " +
+                    error + " Setting Radio State to Unavailable regardless of error.");
+            setRadioState(RadioState.RADIO_UNAVAILABLE);
         }
 
-        if (RILJ_LOGD) riljLog(rr.serialString() + "< " + requestToString(rr.mRequest)
-            + " " + retToString(rr.mRequest, ret));
+        // Here and below fake RIL_UNSOL_RESPONSE_SIM_STATUS_CHANGED, see b/7255789.
+        // This is needed otherwise we don't automatically transition to the main lock
+        // screen when the pin or puk is entered incorrectly.
+        switch (rr.mRequest) {
+            case RIL_REQUEST_ENTER_SIM_PUK:
+            case RIL_REQUEST_ENTER_SIM_PUK2:
+                if (mIccStatusChangedRegistrants != null) {
+                    if (RILJ_LOGD) {
+                        riljLog("ON enter sim puk fakeSimStatusChanged: reg count="
+                                + mIccStatusChangedRegistrants.size());
+                    }
+                    mIccStatusChangedRegistrants.notifyRegistrants();
+                }
+                break;
+        }
 
-        if (rr.mResult != null) {
-            AsyncResult.forMessage(rr.mResult, ret, null);
-            rr.mResult.sendToTarget();
+        if (error != 0) {
+            switch (rr.mRequest) {
+                case RIL_REQUEST_ENTER_SIM_PIN:
+                case RIL_REQUEST_ENTER_SIM_PIN2:
+                case RIL_REQUEST_CHANGE_SIM_PIN:
+                case RIL_REQUEST_CHANGE_SIM_PIN2:
+                case RIL_REQUEST_SET_FACILITY_LOCK:
+                    if (mIccStatusChangedRegistrants != null) {
+                        if (RILJ_LOGD) {
+                            riljLog("ON some errors fakeSimStatusChanged: reg count="
+                                    + mIccStatusChangedRegistrants.size());
+                        }
+                        mIccStatusChangedRegistrants.notifyRegistrants();
+                    }
+                    break;
+            }
+
+            rr.onError(error, ret);
+        } else {
+
+            if (RILJ_LOGD) riljLog(rr.serialString() + "< " + requestToString(rr.mRequest)
+                    + " " + retToString(rr.mRequest, ret));
+
+            if (rr.mResult != null) {
+                AsyncResult.forMessage(rr.mResult, ret, null);
+                rr.mResult.sendToTarget();
+            }
         }
         return rr;
     }
@@ -698,60 +723,6 @@ public class SamsungExynos4RIL extends RIL implements CommandsInterface {
 
         return response;
    }
-
-    @Override
-    protected Object
-    responseSignalStrength(Parcel p) {
-       int numInts = 12;
-        int response[];
-        boolean isGsm = true;
-
-        // Get raw data
-        response = new int[numInts];
-        for (int i = 0 ; i < numInts ; i++) {
-            response[i] = p.readInt();
-        }
-
-        /*
-        Rlog.d(RILJ_LOG_TAG, "gsmSignalStrength=" + response[0]);
-        Rlog.d(RILJ_LOG_TAG, "gsmBitErrorRate=" + response[1]);
-        Rlog.d(RILJ_LOG_TAG, "cdmaDbm=" + response[2]);
-        Rlog.d(RILJ_LOG_TAG, "cdmaEcio=" + response[3]);
-        Rlog.d(RILJ_LOG_TAG, "evdoDbm=" + response[4]);
-        Rlog.d(RILJ_LOG_TAG, "evdoEcio=" + response[5]);
-        Rlog.d(RILJ_LOG_TAG, "evdoSnr=" + response[6]);
-        Rlog.d(RILJ_LOG_TAG, "lteSignalStrength=" + response[7]);
-        Rlog.d(RILJ_LOG_TAG, "lteRsrp=" + response[8]);
-        Rlog.d(RILJ_LOG_TAG, "lteRsrq=" + response[9]);
-        Rlog.d(RILJ_LOG_TAG, "lteRssnr=" + response[10]);
-        Rlog.d(RILJ_LOG_TAG, "lteCqi=" + response[11]);
-        */
-
-        int mGsmSignalStrength = response[0]; // Valid values are (0-31, 99) as defined in TS 27.007 8.5
-        Rlog.d(RILJ_LOG_TAG, "responseSignalStrength (raw): gsmSignalStrength=" + mGsmSignalStrength);
-        mGsmSignalStrength = mGsmSignalStrength & 0xff; // Get the first 8 bits
-        Rlog.d(RILJ_LOG_TAG, "responseSignalStrength (corrected): gsmSignalStrength=" + mGsmSignalStrength);
-
-        /* if mGsmSignalStrength isn't a valid value, use mCdmaDbm as fallback */
-        if (mGsmSignalStrength < 0 || (mGsmSignalStrength > 31 && response[0] != 99)) {
-            int mCdmaDbm = response[2];
-            Rlog.d(RILJ_LOG_TAG, "responseSignalStrength-fallback (raw): gsmSignalStrength=" + mCdmaDbm);
-
-	        if (mCdmaDbm < 0) {
-	            mGsmSignalStrength = 99;
-	        } else if (mCdmaDbm > 31 && mCdmaDbm != 99) {
-	            mGsmSignalStrength = 31;
-	        } else {
-	            mGsmSignalStrength = mCdmaDbm;
-	        }
-            Rlog.d(RILJ_LOG_TAG, "responseSignalStrength-fallback (corrected): gsmSignalStrength=" + mGsmSignalStrength);
-        }
-
-        SignalStrength signalStrength = new SignalStrength(mGsmSignalStrength, response[1], response[2],
-                    response[3], response[4], response[5], response[6], isGsm);
-
-        return signalStrength;
-    }
 
     @Override public void
     getVoiceRadioTechnology(Message result) {
